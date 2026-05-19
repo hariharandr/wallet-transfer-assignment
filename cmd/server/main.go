@@ -14,6 +14,8 @@ import (
 
 	"github.com/hariharandr/wallet-transfer-assignment/internal/config"
 	"github.com/hariharandr/wallet-transfer-assignment/internal/httpapi"
+	"github.com/hariharandr/wallet-transfer-assignment/internal/platform/migrate"
+	"github.com/hariharandr/wallet-transfer-assignment/internal/platform/postgres"
 )
 
 func main() {
@@ -30,6 +32,23 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// migrate first, then open the runtime pool. if the schema can't
+	// get we don't want to serve traffic.
+	if err := migrate.Run(cfg.DatabaseURL); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	_ = pool
+
 	router := httpapi.NewRouter(httpapi.Routes{})
 
 	srv := &http.Server{
@@ -37,9 +56,6 @@ func run(logger *slog.Logger) error {
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		logger.Info("http server listening", "addr", cfg.HTTPAddr)
