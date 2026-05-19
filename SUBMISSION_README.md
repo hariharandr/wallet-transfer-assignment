@@ -330,3 +330,31 @@ Transfer and ledger statuses are Go `int` iota types with `//go:generate stringe
 ### Tests
 
 Docker-backed integration tests check `testing.Short()` and skip if the flag is set. This keeps CI green without Docker (`go test -short`). The full suite including concurrency runs locally with `make test`.
+
+Here's a clean, honest AI Usage section you can drop into the README:
+
+---
+
+## AI Usage
+
+I used Claude throughout this project as a research and decision-support tool, not as a code generator for the core logic.
+
+**Where I used AI:**
+
+- Researching patterns and methods — I asked Claude to compare approaches (e.g. advisory locks vs `SELECT FOR UPDATE`, idempotency strategies) and used those comparisons to make my own call
+- Folder structure — I already had a mental model from prior Go projects; I used AI to sanity-check it, not to generate it
+- Scoping — I asked Claude to estimate whether the core implementation was achievable in ~5 hours and where test coverage would eat the most time
+
+**Decisions I made myself:**
+
+- Storing money as integer minor units (cents) — I decided this upfront, AI confirmed it was standard practice
+- Concurrency test design — 20 goroutines hammering the same wallet, 15 goroutines on the same idempotency key; I designed the scenario, AI helped me think through what to assert
+- TDD approach — I chose to write domain and handler tests first before wiring up the DB layer
+- Researching industry practices — I used Perplexity to search for blogs and articles on how financial institutions handle wallet transfers, double-entry ledger design, and idempotency in payment systems; some decisions (like committing FAILED transfers for replayability and the ledger structure) were influenced by what I read there
+
+**Where AI did the heavy lifting:**
+
+- `docker-compose.yml`, `Makefile`, and this `README.md` — fully AI-generated after I described what I needed
+- Test completeness — I prompted Claude to go through every edge case (idempotency replay, failed transfer replay, concurrent overdraft, race detector) and generate tests that would catch gaps; I reviewed and ran them
+
+The business logic, transaction flow, and architecture decisions are mine. AI handled the scaffolding and helped me not miss edge cases in tests.
