@@ -36,6 +36,7 @@ type Repository interface {
 	WithinTx(ctx context.Context, fn func(tx Tx) error) error
 	InsertIdempotencyPending(ctx context.Context, key, fingerprint string) (bool, error)
 	LoadIdempotency(ctx context.Context, key string) (IdempotencyRecord, error)
+	FinalizeIdempotency(ctx context.Context, key string, httpStatus int, body []byte) error
 }
 
 type PgxRepository struct {
@@ -71,6 +72,22 @@ func (r *PgxRepository) LoadIdempotency(ctx context.Context, key string) (Idempo
 		return IdempotencyRecord{}, fmt.Errorf("load idempotency: %w", err)
 	}
 	return rec, nil
+}
+
+// FinalizeIdempotency closes out a key when the work rolled back, so a
+// retry replays the same answer instead of getting stuck PENDING.
+func (r *PgxRepository) FinalizeIdempotency(ctx context.Context, key string, httpStatus int, body []byte) error {
+	ct, err := r.pool.Exec(ctx,
+		`update idempotency_records
+		   set status='COMPLETED', response_status=$2, response_body=$3::jsonb
+		 where idempotency_key=$1`, key, httpStatus, string(body))
+	if err != nil {
+		return fmt.Errorf("finalize idempotency: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("idempotency row %s missing", key)
+	}
+	return nil
 }
 
 func (r *PgxRepository) WithinTx(ctx context.Context, fn func(tx Tx) error) error {
