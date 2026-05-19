@@ -11,6 +11,15 @@ import (
 	"github.com/hariharandr/wallet-transfer-assignment/internal/domain"
 )
 
+// IdempotencyRecord is the stored state for one idempotency key.
+type IdempotencyRecord struct {
+	Fingerprint    string
+	Status         string
+	TransferID     string
+	ResponseStatus int
+	ResponseBody   []byte
+}
+
 // Tx is the db work the service does inside a single transaction.
 type Tx interface {
 	LockWallets(ctx context.Context, ids ...string) (map[string]domain.Wallet, error)
@@ -18,11 +27,15 @@ type Tx interface {
 	UpdateTransferState(ctx context.Context, id string, st domain.TransferState, reason string) error
 	InsertLedgerEntry(ctx context.Context, e domain.LedgerEntry) error
 	AdjustBalance(ctx context.Context, walletID string, delta int64) error
+	CompleteIdempotency(ctx context.Context, key, transferID string, httpStatus int, body []byte) error
 }
 
-// Repository owns the transaction boundary.
+// Repository owns the transaction boundary plus the idempotency claim,
+// which has to live outside the transfer tx so duplicates can see it.
 type Repository interface {
 	WithinTx(ctx context.Context, fn func(tx Tx) error) error
+	InsertIdempotencyPending(ctx context.Context, key, fingerprint string) (bool, error)
+	LoadIdempotency(ctx context.Context, key string) (IdempotencyRecord, error)
 }
 
 type PgxRepository struct {
@@ -33,13 +46,38 @@ func NewPgxRepository(pool *pgxpool.Pool) *PgxRepository {
 	return &PgxRepository{pool: pool}
 }
 
-// WithinTx runs fn in a tx. commit on nil error, otherwise rollback.
+// InsertIdempotencyPending tries to claim the key. returns true only if
+// this caller inserted the row, false if it was already there.
+func (r *PgxRepository) InsertIdempotencyPending(ctx context.Context, key, fingerprint string) (bool, error) {
+	ct, err := r.pool.Exec(ctx,
+		`insert into idempotency_records (idempotency_key, request_fingerprint, status)
+		 values ($1,$2,'PENDING') on conflict (idempotency_key) do nothing`, key, fingerprint)
+	if err != nil {
+		return false, fmt.Errorf("insert idempotency: %w", err)
+	}
+	return ct.RowsAffected() == 1, nil
+}
+
+func (r *PgxRepository) LoadIdempotency(ctx context.Context, key string) (IdempotencyRecord, error) {
+	var rec IdempotencyRecord
+	err := r.pool.QueryRow(ctx,
+		`select request_fingerprint, status,
+		        coalesce(transfer_id::text,''),
+		        coalesce(response_status,0),
+		        coalesce(response_body,'null'::jsonb)
+		 from idempotency_records where idempotency_key=$1`, key).
+		Scan(&rec.Fingerprint, &rec.Status, &rec.TransferID, &rec.ResponseStatus, &rec.ResponseBody)
+	if err != nil {
+		return IdempotencyRecord{}, fmt.Errorf("load idempotency: %w", err)
+	}
+	return rec, nil
+}
+
 func (r *PgxRepository) WithinTx(ctx context.Context, fn func(tx Tx) error) error {
 	pgtx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	// safe even after commit, pgx just returns tx closed which we ignore.
 	defer func() { _ = pgtx.Rollback(ctx) }()
 
 	if err := fn(&pgxTx{tx: pgtx}); err != nil {
@@ -130,6 +168,22 @@ func (p *pgxTx) AdjustBalance(ctx context.Context, walletID string, delta int64)
 		delta, walletID)
 	if err != nil {
 		return fmt.Errorf("adjust balance: %w", err)
+	}
+	return nil
+}
+
+// CompleteIdempotency flips the claimed row to done and stashes the
+// response so a later duplicate can replay it exactly.
+func (p *pgxTx) CompleteIdempotency(ctx context.Context, key, transferID string, httpStatus int, body []byte) error {
+	ct, err := p.tx.Exec(ctx,
+		`update idempotency_records
+		   set status='COMPLETED', transfer_id=$2::uuid, response_status=$3, response_body=$4::jsonb
+		 where idempotency_key=$1`, key, transferID, httpStatus, string(body))
+	if err != nil {
+		return fmt.Errorf("complete idempotency: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("idempotency row %s missing", key)
 	}
 	return nil
 }
