@@ -16,6 +16,7 @@ import (
 	"github.com/hariharandr/wallet-transfer-assignment/internal/httpapi"
 	"github.com/hariharandr/wallet-transfer-assignment/internal/platform/migrate"
 	"github.com/hariharandr/wallet-transfer-assignment/internal/platform/postgres"
+	"github.com/hariharandr/wallet-transfer-assignment/internal/transfer"
 )
 
 func main() {
@@ -47,9 +48,8 @@ func run(logger *slog.Logger) error {
 	}
 	defer pool.Close()
 
-	_ = pool
-
-	router := httpapi.NewRouter(httpapi.Routes{})
+	transfers := transfer.NewHandler(transfer.NewService(transfer.NewPgxRepository(pool)))
+	router := httpapi.NewRouter(httpapi.Routes{Transfer: transfers.Routes})
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
